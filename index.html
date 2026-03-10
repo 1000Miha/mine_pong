@@ -187,6 +187,37 @@
             text-shadow: 2px 2px #3f3f00;
             transform: rotate(-5deg);
         }
+        #countdown {
+            position: absolute;
+            top: 74px;
+            left: 0;
+            width: 100%;
+            height: calc(100% - 74px);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 72px;
+            color: #ffff55;
+            text-shadow: 4px 4px #3f3f00;
+            background: rgba(0, 0, 0, 0.35);
+            z-index: 9;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.12s ease-in;
+        }
+        #countdown.show {
+            opacity: 1;
+        }
+        #pong.shake {
+            animation: shake 0.22s;
+        }
+        @keyframes shake {
+            0% { transform: translate(0, 0); }
+            25% { transform: translate(3px, -2px); }
+            50% { transform: translate(-3px, 2px); }
+            75% { transform: translate(2px, -1px); }
+            100% { transform: translate(0, 0); }
+        }
         @media (max-width: 900px) {
             #game-container {
                 transform: scale(0.86);
@@ -235,17 +266,27 @@
             <button id="start-btn" type="button">START</button>
         </div>
 
+        <div id="countdown"></div>
+
         <canvas id="pong" width="800" height="512"></canvas>
     </div>
 
     <div id="controls-panel">
         <button id="pause-btn" type="button">PAUSE</button>
         <button id="restart-btn" type="button">RESTART</button>
+        <button id="mute-btn" type="button">SOUND: ON</button>
+        <button id="reset-best-btn" type="button">RESET BEST</button>
         <span class="control-label">DIFFICULTY</span>
         <select id="difficulty" aria-label="Difficulty">
             <option value="easy">Easy</option>
             <option value="normal" selected>Normal</option>
             <option value="hard">Hard</option>
+        </select>
+        <span class="control-label">MODE</span>
+        <select id="mode" aria-label="Mode">
+            <option value="endless">Endless</option>
+            <option value="five">First to 5</option>
+            <option value="ten">First to 10</option>
         </select>
     </div>
 
@@ -254,16 +295,18 @@
         <button id="touch-down" class="touch-btn" type="button">DOWN</button>
     </div>
 
-    <div id="help">Controls: mouse, W/S, arrow keys, or touch buttons.</div>
+    <div id="help">Controls: mouse, W/S, arrow keys, touch buttons, Space to pause, M to mute.</div>
 
     <script>
         const BEST_STATS_KEY = "minePongBestStatsV1";
+        const SETTINGS_KEY = "minePongSettingsV1";
 
         const canvas = document.getElementById("pong");
         const ctx = canvas.getContext("2d");
         const screen = document.getElementById("screen");
         const splashEl = document.getElementById("splash");
         const statusText = document.getElementById("status-text");
+        const countdownEl = document.getElementById("countdown");
 
         const winsEl = document.getElementById("wins");
         const lossesEl = document.getElementById("losses");
@@ -274,7 +317,10 @@
         const startBtn = document.getElementById("start-btn");
         const pauseBtn = document.getElementById("pause-btn");
         const restartBtn = document.getElementById("restart-btn");
+        const muteBtn = document.getElementById("mute-btn");
+        const resetBestBtn = document.getElementById("reset-best-btn");
         const difficultySelect = document.getElementById("difficulty");
+        const modeSelect = document.getElementById("mode");
 
         const touchUpBtn = document.getElementById("touch-up");
         const touchDownBtn = document.getElementById("touch-down");
@@ -298,9 +344,15 @@
         };
 
         let gameState = "MENU";
-        let activeDifficulty = "normal";
         let stats = { wins: 0, losses: 0, hits: 0 };
         let bestStats = loadBestStats();
+        let settings = loadSettings();
+        let activeDifficulty = settings.difficulty;
+        let matchTarget = settings.matchTarget;
+        let audioEnabled = settings.audioEnabled;
+        let resetOnStart = false;
+        let countdownTimer = null;
+        let audioCtx = null;
 
         const controls = {
             up: false,
@@ -331,8 +383,29 @@
             }
         }
 
+        function loadSettings() {
+            try {
+                const raw = localStorage.getItem(SETTINGS_KEY);
+                if (!raw) {
+                    return { audioEnabled: true, difficulty: "normal", matchTarget: "endless" };
+                }
+                const parsed = JSON.parse(raw);
+                return {
+                    audioEnabled: parsed.audioEnabled !== false,
+                    difficulty: typeof parsed.difficulty === "string" ? parsed.difficulty : "normal",
+                    matchTarget: typeof parsed.matchTarget === "string" ? parsed.matchTarget : "endless"
+                };
+            } catch (e) {
+                return { audioEnabled: true, difficulty: "normal", matchTarget: "endless" };
+            }
+        }
+
         function saveBestStats() {
             localStorage.setItem(BEST_STATS_KEY, JSON.stringify(bestStats));
+        }
+
+        function saveSettings() {
+            localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
         }
 
         function updateBestStat(key, value) {
@@ -348,6 +421,102 @@
             hitsEl.innerText = stats.hits;
             bestWinsEl.innerText = bestStats.wins;
             bestHitsEl.innerText = bestStats.hits;
+        }
+
+        function normalizeSettings() {
+            if (!difficultyConfig[activeDifficulty]) activeDifficulty = "normal";
+            const validModes = ["endless", "five", "ten"];
+            if (!validModes.includes(matchTarget)) matchTarget = "endless";
+            settings = {
+                audioEnabled: audioEnabled !== false,
+                difficulty: activeDifficulty,
+                matchTarget: matchTarget
+            };
+            saveSettings();
+        }
+
+        function applySettingsToUI() {
+            difficultySelect.value = activeDifficulty;
+            modeSelect.value = matchTarget;
+            muteBtn.innerText = audioEnabled ? "SOUND: ON" : "SOUND: OFF";
+        }
+
+        function getMatchTarget() {
+            if (matchTarget === "five") return 5;
+            if (matchTarget === "ten") return 10;
+            return null;
+        }
+
+        function ensureAudioContext() {
+            if (!audioEnabled) return null;
+            if (!audioCtx) {
+                const Ctx = window.AudioContext || window.webkitAudioContext;
+                if (!Ctx) return null;
+                audioCtx = new Ctx();
+            }
+            if (audioCtx.state === "suspended") {
+                audioCtx.resume().catch(() => {});
+            }
+            return audioCtx;
+        }
+
+        function playTone(freq, duration, type = "square", volume = 0.05) {
+            if (!audioEnabled) return;
+            const ctx = ensureAudioContext();
+            if (!ctx) return;
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.type = type;
+            osc.frequency.value = freq;
+            gain.gain.value = volume;
+            osc.connect(gain).connect(ctx.destination);
+            osc.start();
+            osc.stop(ctx.currentTime + duration);
+        }
+
+        function triggerShake() {
+            canvas.classList.remove("shake");
+            void canvas.offsetWidth;
+            canvas.classList.add("shake");
+        }
+
+        function showCountdown(text) {
+            countdownEl.textContent = text;
+            countdownEl.classList.add("show");
+        }
+
+        function hideCountdown() {
+            countdownEl.classList.remove("show");
+            countdownEl.textContent = "";
+        }
+
+        function beginServeCountdown() {
+            if (countdownTimer) {
+                clearInterval(countdownTimer);
+                countdownTimer = null;
+            }
+            gameState = "COUNTDOWN";
+            const steps = ["3", "2", "1", "GO!"];
+            let idx = 0;
+            showCountdown(steps[idx]);
+            playTone(320, 0.05);
+            countdownTimer = setInterval(() => {
+                idx += 1;
+                if (idx >= steps.length) {
+                    clearInterval(countdownTimer);
+                    countdownTimer = null;
+                    hideCountdown();
+                    gameState = "PLAYING";
+                    return;
+                }
+                showCountdown(steps[idx]);
+                playTone(idx === steps.length - 1 ? 660 : 320, 0.06);
+                if (steps[idx] === "GO!") {
+                    setTimeout(() => {
+                        if (gameState === "COUNTDOWN") hideCountdown();
+                    }, 250);
+                }
+            }, 600);
         }
 
         function setRandomSplash() {
@@ -384,10 +553,16 @@
 
         function startGame() {
             hideMenu();
-            gameState = "PLAYING";
             pauseBtn.innerText = "PAUSE";
+            if (resetOnStart) {
+                stats = { wins: 0, losses: 0, hits: 0 };
+                renderStats();
+                resetOnStart = false;
+            }
             resetPaddles();
             resetBall();
+            ensureAudioContext();
+            beginServeCountdown();
         }
 
         function togglePause() {
@@ -396,8 +571,8 @@
                 gameState = "PAUSED";
                 pauseBtn.innerText = "RESUME";
             } else if (gameState === "PAUSED") {
-                gameState = "PLAYING";
                 pauseBtn.innerText = "PAUSE";
+                beginServeCountdown();
             }
         }
 
@@ -444,7 +619,11 @@
                 stats.hits += 1;
                 updateBestStat("hits", stats.hits);
                 renderStats();
+                playTone(520, 0.05);
+            } else {
+                playTone(440, 0.05);
             }
+            triggerShake();
         }
 
         function update() {
@@ -475,7 +654,19 @@
                 stats.wins += 1;
                 updateBestStat("wins", stats.wins);
                 renderStats();
+                playTone(700, 0.08);
+                triggerShake();
+                const target = getMatchTarget();
+                if (target && stats.wins >= target) {
+                    resetOnStart = true;
+                    setRandomSplash();
+                    showMenu("You win! Press START for a new match.");
+                    resetPaddles();
+                    resetBall();
+                    return;
+                }
                 resetBall();
+                beginServeCountdown();
             }
 
             if (ball.x + ball.size < 0) {
@@ -483,6 +674,7 @@
                 stats.wins = 0;
                 stats.hits = 0;
                 renderStats();
+                playTone(240, 0.12, "sawtooth", 0.04);
                 setRandomSplash();
                 showMenu("You lost. Press START to play again.");
                 resetPaddles();
@@ -539,13 +731,39 @@
             });
         }
 
+        function toggleMute() {
+            audioEnabled = !audioEnabled;
+            settings.audioEnabled = audioEnabled;
+            saveSettings();
+            applySettingsToUI();
+            if (audioEnabled) playTone(520, 0.06);
+        }
+
+        function resetBestStats() {
+            const ok = confirm("Reset best stats? This cannot be undone.");
+            if (!ok) return;
+            bestStats = { wins: 0, hits: 0 };
+            saveBestStats();
+            renderStats();
+        }
+
         startBtn.addEventListener("click", startGame);
         pauseBtn.addEventListener("click", togglePause);
         restartBtn.addEventListener("click", restartMatch);
+        muteBtn.addEventListener("click", toggleMute);
+        resetBestBtn.addEventListener("click", resetBestStats);
 
         difficultySelect.addEventListener("change", (e) => {
             activeDifficulty = e.target.value;
+            settings.difficulty = activeDifficulty;
+            saveSettings();
             resetBall();
+        });
+
+        modeSelect.addEventListener("change", (e) => {
+            matchTarget = e.target.value;
+            settings.matchTarget = matchTarget;
+            saveSettings();
         });
 
         canvas.addEventListener("mousemove", (e) => {
@@ -568,6 +786,10 @@
             }
             if (e.key === " ") {
                 togglePause();
+                e.preventDefault();
+            }
+            if (e.key === "m" || e.key === "M") {
+                toggleMute();
                 e.preventDefault();
             }
         });
@@ -603,7 +825,8 @@
             requestAnimationFrame(draw);
         }
 
-        difficultySelect.value = activeDifficulty;
+        normalizeSettings();
+        applySettingsToUI();
         setRandomSplash();
         renderStats();
         showMenu("Too much bugs, I cannot fix, lol");
